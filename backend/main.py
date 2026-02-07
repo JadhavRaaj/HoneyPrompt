@@ -3,9 +3,13 @@ import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from dotenv import load_dotenv
 from groq import Groq
+
+# Import our custom modules
+from detection import analyze_prompt
+from logger import log_threat, get_logs
 
 # Load environment variables
 load_dotenv()
@@ -15,7 +19,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 app = FastAPI(
     title="HoneyPrompt Sentinel",
     description="AI Intrusion Detection System & LLM Proxy Middleware",
-    version="2.4"
+    version="2.5"
 )
 
 app.add_middleware(
@@ -64,10 +68,24 @@ async def health_check():
         "provider": "Groq (Llama 3.1)"
     }
 
+# --- NEW ENDPOINT: View Logs ---
+@app.get("/api/logs")
+async def fetch_logs():
+    """Returns the history of detected attacks."""
+    return get_logs()
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_proxy(request: ChatRequest):
     user_message = request.message
     print(f"\n[Incoming Request]: {user_message}")
+
+    # --- STEP 1: ANALYZE INTENT (The Trap) ---
+    analysis = analyze_prompt(user_message)
+    
+    if analysis["is_threat"]:
+        print(f"⚠️ THREAT DETECTED: {analysis['categories']} (Risk: {analysis['risk_score']})")
+    else:
+        print("✅ Message Safe")
 
     if not GROQ_API_KEY:
         raise HTTPException(status_code=500, detail="FATAL: GROQ_API_KEY not found")
@@ -87,16 +105,20 @@ async def chat_proxy(request: ChatRequest):
             max_tokens=512
         )
 
-        # ✅ FINAL, CORRECT ACCESS
         ai_reply = completion.choices[0].message.content
+        print(f"[Llama 3.1 Response]: {ai_reply[:80]}...")
 
-        print(f"[Llama 3.1 Response]: {ai_reply[:80]}")
+        # --- STEP 2: LOGGING (The Memory) ---
+        # If it was a threat, save it to our JSON file
+        if analysis["is_threat"]:
+            log_threat(user_message, analysis, ai_reply)
 
         return {
             "response": ai_reply,
             "metadata": {
-                "threat_detected": False,
-                "risk_score": 0,
+                "threat_detected": analysis["is_threat"],
+                "risk_score": analysis["risk_score"],
+                "categories": analysis["categories"],
                 "model": "llama-3.1-8b-instant"
             }
         }
